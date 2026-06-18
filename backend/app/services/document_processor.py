@@ -1,11 +1,11 @@
 import os
+import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List
 from uuid import uuid4
 import pandas as pd
 import pdfplumber
 from docx import Document as DocxDocument
-
 from ..config import UPLOAD_DIR
 
 class DocumentProcessor:
@@ -18,7 +18,6 @@ class DocumentProcessor:
             suffix = target_path.suffix
             target_path = target_path.with_name(f"{stem}-{uuid4().hex[:8]}{suffix}")
         
-        # Ensure we're at the start of the file
         file_obj.seek(0)
         with open(target_path, "wb") as out_file:
             content = file_obj.read()
@@ -26,7 +25,7 @@ class DocumentProcessor:
         return str(target_path)
 
     @staticmethod
-    def extract_metadata(path: str, original_filename: str, category: str, source: str) -> dict[str, Any]:
+    def extract_metadata(path: str, original_filename: str, category: str, source: str) -> Dict[str, Any]:
         file_path = Path(path)
         return {
             "original_filename": Path(original_filename).name,
@@ -38,7 +37,23 @@ class DocumentProcessor:
         }
 
     @staticmethod
-    def parse_excel(path: str) -> dict[str, Any]:
+    def generate_preview(parsed: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate a lightweight preview of the document content."""
+        if parsed["type"] == "excel":
+            preview = {}
+            for sheet, data in parsed["sheets"].items():
+                preview[sheet] = data[:10]  # First 10 rows
+            return {"type": "excel", "data": preview}
+        elif parsed["type"] == "csv":
+            return {"type": "csv", "data": parsed["rows"][:10]}
+        elif parsed["type"] == "pdf":
+            return {"type": "pdf", "data": parsed["text"][:1000]}
+        elif parsed["type"] == "docx":
+            return {"type": "docx", "data": "\n".join(parsed["paragraphs"][:10])}
+        return {"type": "unknown", "data": ""}
+
+    @staticmethod
+    def parse_excel(path: str) -> Dict[str, Any]:
         workbook = pd.ExcelFile(path)
         sheets = {}
         for sheet in workbook.sheet_names:
@@ -47,12 +62,12 @@ class DocumentProcessor:
         return {"type": "excel", "sheets": sheets}
 
     @staticmethod
-    def parse_csv(path: str) -> dict[str, Any]:
+    def parse_csv(path: str) -> Dict[str, Any]:
         df = pd.read_csv(path)
         return {"type": "csv", "rows": df.fillna("").to_dict(orient="records")}
 
     @staticmethod
-    def parse_pdf(path: str) -> dict[str, Any]:
+    def parse_pdf(path: str) -> Dict[str, Any]:
         text = []
         tables = []
         with pdfplumber.open(path) as pdf:
@@ -63,7 +78,7 @@ class DocumentProcessor:
         return {"type": "pdf", "text": "\n".join(text), "tables": tables}
 
     @staticmethod
-    def parse_docx(path: str) -> dict[str, Any]:
+    def parse_docx(path: str) -> Dict[str, Any]:
         doc = DocxDocument(path)
         paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
         tables = []
@@ -75,26 +90,50 @@ class DocumentProcessor:
         return {"type": "docx", "paragraphs": paragraphs, "tables": tables}
 
     @staticmethod
-    def to_chunks(parsed: dict[str, Any], limit: int = 500) -> list[str]:
+    def to_chunks(parsed: Dict[str, Any], limit: int = 1000) -> List[str]:
         chunks = []
         if parsed["type"] in ["excel", "csv"]:
             rows = []
             if parsed["type"] == "excel":
                 for sheet, records in parsed["sheets"].items():
-                    rows.extend([f"Sheet: {sheet} | Data: {record}" for record in records])
+                    for record in records:
+                        rows.append(f"Sheet: {sheet} | Data: {json.dumps(record)}")
             else:
-                rows = [f"Data: {record}" for record in parsed["rows"]]
-            chunks = [row for row in rows if row.strip()]
-        elif parsed["type"] == "pdf":
-            # Better PDF chunking: split by paragraphs and limit chunk size
-            raw_chunks = [chunk.strip() for chunk in parsed["text"].split("\n\n") if chunk.strip()]
-            for rc in raw_chunks:
-                if len(rc) > 1000:
-                    # Simple split for very long paragraphs
-                    chunks.extend([rc[i:i+1000] for i in range(0, len(rc), 1000)])
+                for record in parsed["rows"]:
+                    rows.append(f"Data: {json.dumps(record)}")
+            
+            # Group rows into larger chunks to provide context
+            current_chunk = []
+            current_len = 0
+            for row in rows:
+                if current_len + len(row) > 1500:
+                    chunks.append("\n".join(current_chunk))
+                    current_chunk = [row]
+                    current_len = len(row)
                 else:
-                    chunks.append(rc)
+                    current_chunk.append(row)
+                    current_len += len(row)
+            if current_chunk:
+                chunks.append("\n".join(current_chunk))
+
+        elif parsed["type"] == "pdf":
+            text = parsed["text"]
+            # Split by double newline for paragraphs
+            paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+            for p in paragraphs:
+                if len(p) > 1500:
+                    # Sub-chunking long paragraphs
+                    for i in range(0, len(p), 1200):
+                        chunks.append(p[i:i+1500])
+                else:
+                    chunks.append(p)
+        
         elif parsed["type"] == "docx":
-            chunks = [paragraph.strip() for paragraph in parsed["paragraphs"] if paragraph.strip()]
+            for p in parsed["paragraphs"]:
+                if len(p) > 1500:
+                    for i in range(0, len(p), 1200):
+                        chunks.append(p[i:i+1500])
+                else:
+                    chunks.append(p)
         
         return chunks[:limit]

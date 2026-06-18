@@ -1,11 +1,7 @@
-# This package allows model imports from the models module.
 from datetime import datetime
-
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
-
 from ..db.base import Base
-
 
 class Role(Base):
     __tablename__ = "roles"
@@ -14,14 +10,12 @@ class Role(Base):
     description = Column(String(255), nullable=True)
     users = relationship("User", back_populates="role")
 
-
 class Department(Base):
     __tablename__ = "departments"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(128), unique=True, nullable=False)
     units = relationship("Unit", back_populates="department")
     users = relationship("User", back_populates="department")
-
 
 class Unit(Base):
     __tablename__ = "units"
@@ -30,7 +24,6 @@ class Unit(Base):
     department_id = Column(Integer, ForeignKey("departments.id"), nullable=False)
     department = relationship("Department", back_populates="units")
     users = relationship("User", back_populates="unit")
-
 
 class User(Base):
     __tablename__ = "users"
@@ -50,7 +43,6 @@ class User(Base):
     documents = relationship("Document", back_populates="uploader")
     audit_logs = relationship("AuditLog", back_populates="user")
 
-
 class Document(Base):
     __tablename__ = "documents"
     id = Column(Integer, primary_key=True, index=True)
@@ -61,9 +53,10 @@ class Document(Base):
     uploaded_at = Column(DateTime, default=datetime.utcnow)
     metadata_json = Column("metadata", Text, nullable=True)
     status = Column(String(64), default="uploaded")
+    summary = Column(Text, nullable=True)
+    preview_json = Column("preview", Text, nullable=True)
     uploader = relationship("User", back_populates="documents")
     chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
-
 
 class DocumentChunk(Base):
     __tablename__ = "document_chunks"
@@ -74,7 +67,6 @@ class DocumentChunk(Base):
     embedding_id = Column(String(255), nullable=True)
     document = relationship("Document", back_populates="chunks")
 
-
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     id = Column(Integer, primary_key=True, index=True)
@@ -84,7 +76,6 @@ class AuditLog(Base):
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     user = relationship("User", back_populates="audit_logs")
-
 
 __all__ = [
     "AuditLog",

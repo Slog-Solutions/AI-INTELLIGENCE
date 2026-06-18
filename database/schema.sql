@@ -36,7 +36,9 @@ CREATE TABLE documents (
     uploader_id INTEGER NOT NULL REFERENCES users(id),
     uploaded_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
     metadata TEXT,
-    status VARCHAR(64) DEFAULT 'uploaded'
+    status VARCHAR(64) DEFAULT 'uploaded',
+    summary TEXT,
+    preview TEXT
 );
 
 CREATE TABLE document_chunks (

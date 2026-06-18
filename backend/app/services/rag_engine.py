@@ -1,36 +1,83 @@
 import requests
+import json
+import logging
+from typing import List, Dict, Any
 from ..config import OLLAMA_URL, OLLAMA_MODEL
+
+logger = logging.getLogger(__name__)
 
 class RAGEngine:
     def __init__(self, vector_store):
         self.vector_store = vector_store
 
-    def build_prompt(self, query: str, sources: list[dict]) -> str:
-        context = "\n\n".join([f"--- SOURCE: {src['metadata'].get('filename', 'unknown')} ---\n{src['document']}" for src in sources])
+    def build_prompt(self, query: str, sources: List[Dict[str, Any]]) -> str:
+        context_parts = []
+        for i, src in enumerate(sources):
+            filename = src['metadata'].get('original_filename') or src['metadata'].get('filename', 'unknown')
+            context_parts.append(f"--- SOURCE {i+1}: {filename} ---\n{src['document']}")
+        
+        context = "\n\n".join(context_parts)
+        
         return (
-            "You are the ATIP Army Intelligence AI. Use the provided context to answer the user's query accurately. "
-            "If the answer is not in the context, say you don't know based on the provided documents. "
-            "Always cite the source filenames in your answer.\n\n"
-            f"Context:\n{context}\n\n"
-            f"Question: {query}\n"
-            "Answer:"
+            "You are the Army Training Intelligence Platform (ATIP) Assistant, a highly specialized military intelligence AI. "
+            "Your goal is to provide accurate, concise, and actionable insights based ONLY on the provided training reports and documents.\n\n"
+            "INSTRUCTIONS:\n"
+            "1. Use the provided context to answer the user's query.\n"
+            "2. If the answer is not in the context, explicitly state that the information is not available in the current document set.\n"
+            "3. Always cite the specific source filenames used in your answer.\n"
+            "4. Format your response using professional military terminology where appropriate.\n"
+            "5. If numbers or trends are requested, extract them precisely from the context.\n\n"
+            f"CONTEXT:\n{context}\n\n"
+            f"USER QUERY: {query}\n\n"
+            "INTELLIGENCE REPORT:"
         )
 
-    def query(self, query: str) -> dict:
-        results = self.vector_store.query(query, n_results=4)
-        documents = []
-        sources = []
-        for idx, doc_id in enumerate(results.get("ids", [[]])[0]):
-            metadata = results["metadatas"][0][idx]
-            documents.append({"document": results["documents"][0][idx], "metadata": metadata})
-            citation = metadata.get("citation") or metadata.get("filename", "unknown")
-            if citation not in sources:
-                sources.append(citation)
-        if not documents:
-            return {"answer": "No relevant documents were found for this question.", "sources": []}
-        prompt = self.build_prompt(query, documents)
-        response_text = self.call_ollama(prompt)
-        return {"answer": response_text, "sources": sources}
+    def generate_summary_prompt(self, filename: str, content: str) -> str:
+        return (
+            f"Analyze the following content from the document '{filename}' and provide a structured military intelligence summary.\n\n"
+            "CONTENT:\n"
+            f"{content[:4000]}\n\n"
+            "Provide the summary in the following format:\n"
+            "- **What this report contains**: (Brief overview)\n"
+            "- **Key insights**: (3-5 bullet points)\n"
+            "- **Important numbers**: (Specific data points)\n"
+            "- **Trends detected**: (Any patterns observed)\n"
+            "- **Recommendations**: (Actionable advice)"
+        )
+
+    def query(self, query: str) -> Dict[str, Any]:
+        try:
+            results = self.vector_store.query(query, n_results=5)
+            documents = []
+            sources = []
+            
+            if not results or not results.get("ids") or not results["ids"][0]:
+                return {"answer": "I could not find any relevant documents in the intelligence database to answer your question.", "sources": []}
+
+            for idx in range(len(results["ids"][0])):
+                doc_text = results["documents"][0][idx]
+                metadata = results["metadatas"][0][idx]
+                documents.append({"document": doc_text, "metadata": metadata})
+                
+                filename = metadata.get("original_filename") or metadata.get("filename", "unknown")
+                if filename not in sources:
+                    sources.append(filename)
+
+            prompt = self.build_prompt(query, documents)
+            response_text = self.call_ollama(prompt)
+            
+            return {"answer": response_text, "sources": sources}
+        except Exception as e:
+            logger.error(f"RAG Query Error: {str(e)}")
+            return {"answer": f"Internal Intelligence Engine Error: {str(e)}", "sources": []}
+
+    def summarize_document(self, filename: str, content: str) -> str:
+        try:
+            prompt = self.generate_summary_prompt(filename, content)
+            return self.call_ollama(prompt)
+        except Exception as e:
+            logger.error(f"Summarization Error: {str(e)}")
+            return "Failed to generate AI summary."
 
     def call_ollama(self, prompt: str) -> str:
         payload = {
@@ -38,19 +85,24 @@ class RAGEngine:
             "prompt": prompt,
             "stream": False,
             "options": {
-                "num_predict": 512,
-                "temperature": 0.2,
+                "num_predict": 1024,
+                "temperature": 0.1,
+                "top_p": 0.9
             },
         }
         url = f"{OLLAMA_URL.rstrip('/')}/api/generate"
-        resp = requests.post(url, json=payload, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-        if "response" in data:
-            return data["response"]
-        if "results" in data:
-            return data.get("results", [{}])[0].get("content", "")
-        if "choices" in data:
-            choice = data["choices"][0]
-            return choice.get("message", {}).get("content") or choice.get("text", "")
-        return ""
+        try:
+            resp = requests.post(url, json=payload, timeout=90)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            # Handle different Ollama API response formats
+            if "response" in data:
+                return data["response"].strip()
+            elif "message" in data and "content" in data["message"]:
+                return data["message"]["content"].strip()
+            
+            return "Error: Unexpected response format from Ollama."
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Ollama Connection Error: {str(e)}")
+            raise Exception(f"Failed to connect to Ollama service at {OLLAMA_URL}. Ensure Ollama is running.")

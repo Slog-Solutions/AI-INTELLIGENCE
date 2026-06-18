@@ -44,6 +44,9 @@ class DocumentUploadResponse(BaseModel):
     filename: str
     category: str
     source: str
+    status: str
+    summary: Optional[str] = None
+    preview: Optional[Any] = None
     uploaded_at: datetime
 
 class DocumentOut(BaseModel):
@@ -51,8 +54,13 @@ class DocumentOut(BaseModel):
     filename: str
     category: str
     source: str
-    metadata: Optional[Any]
+    status: str
+    summary: Optional[str] = None
+    preview: Optional[Any] = None
+    metadata: Optional[Any] = None
     uploaded_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 class ChatRequest(BaseModel):
     query: str
@@ -60,3 +68,4 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     sources: List[str] = []
+    thought: Optional[str] = None

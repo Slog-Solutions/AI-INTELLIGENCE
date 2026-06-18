@@ -10,7 +10,6 @@ from ..core.rbac import require_roles
 
 router = APIRouter()
 
-
 def get_db():
     db = SessionLocal()
     try:
@@ -24,8 +23,10 @@ def query_chat(request: ChatRequest, db: Session = Depends(get_db), current_user
     rag = RAGEngine(vector_store)
     try:
         response = rag.query(request.query)
+        AuditService.create_entry(db, current_user.id, "chat_query", "chat", f"Query: {request.query}")
+        return ChatResponse(
+            answer=response["answer"], 
+            sources=response["sources"]
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-
-    AuditService.create_entry(db, current_user.id, "chat_query", "chat", f"Query: {request.query}")
-    return ChatResponse(answer=response["answer"], sources=response["sources"])
