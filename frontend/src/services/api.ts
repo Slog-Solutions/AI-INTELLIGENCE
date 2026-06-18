@@ -3,7 +3,8 @@ import { getAuthToken, clearAuthSession, isTokenExpired } from "./auth";
 
 const api = axios.create({
   baseURL: "http://localhost:8000",
-  headers: { "Content-Type": "application/json" },
+  // Let axios set Content-Type automatically for FormData
+  headers: {},
 });
 
 api.interceptors.request.use((config) => {

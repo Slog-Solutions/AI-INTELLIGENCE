@@ -29,10 +29,13 @@ export default function UploadPage() {
     formData.append("source", source);
 
     try {
+      setMessage("Uploading and processing... please wait.");
       await api.post("/upload/file", formData);
-      setMessage("Upload successful.");
-    } catch (err) {
-      setMessage("Upload failed.");
+      setMessage("Upload and processing successful.");
+      setFile(null);
+    } catch (err: any) {
+      const errorMsg = err.response?.data?.detail || "Upload failed.";
+      setMessage(`Error: ${errorMsg}`);
     }
   };
 

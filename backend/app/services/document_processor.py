@@ -17,8 +17,12 @@ class DocumentProcessor:
             stem = target_path.stem
             suffix = target_path.suffix
             target_path = target_path.with_name(f"{stem}-{uuid4().hex[:8]}{suffix}")
+        
+        # Ensure we're at the start of the file
+        file_obj.seek(0)
         with open(target_path, "wb") as out_file:
-            out_file.write(file_obj.read())
+            content = file_obj.read()
+            out_file.write(content)
         return str(target_path)
 
     @staticmethod
@@ -71,20 +75,26 @@ class DocumentProcessor:
         return {"type": "docx", "paragraphs": paragraphs, "tables": tables}
 
     @staticmethod
-    def to_chunks(parsed: dict[str, Any], limit: int = 100) -> list[str]:
+    def to_chunks(parsed: dict[str, Any], limit: int = 500) -> list[str]:
+        chunks = []
         if parsed["type"] in ["excel", "csv"]:
             rows = []
             if parsed["type"] == "excel":
                 for sheet, records in parsed["sheets"].items():
-                    rows.extend([f"sheet={sheet} row={record}" for record in records])
+                    rows.extend([f"Sheet: {sheet} | Data: {record}" for record in records])
             else:
-                rows = [str(record) for record in parsed["rows"]]
-            return [row for row in rows if row.strip()][:limit]
-        if parsed["type"] == "pdf":
-            chunks = [chunk.strip() for chunk in parsed["text"].split("\n\n") if chunk.strip()]
-            if not chunks and parsed["text"].strip():
-                chunks = [parsed["text"].strip()]
-            return chunks[:limit]
-        if parsed["type"] == "docx":
-            return [paragraph.strip() for paragraph in parsed["paragraphs"] if paragraph.strip()][:limit]
-        return []
+                rows = [f"Data: {record}" for record in parsed["rows"]]
+            chunks = [row for row in rows if row.strip()]
+        elif parsed["type"] == "pdf":
+            # Better PDF chunking: split by paragraphs and limit chunk size
+            raw_chunks = [chunk.strip() for chunk in parsed["text"].split("\n\n") if chunk.strip()]
+            for rc in raw_chunks:
+                if len(rc) > 1000:
+                    # Simple split for very long paragraphs
+                    chunks.extend([rc[i:i+1000] for i in range(0, len(rc), 1000)])
+                else:
+                    chunks.append(rc)
+        elif parsed["type"] == "docx":
+            chunks = [paragraph.strip() for paragraph in parsed["paragraphs"] if paragraph.strip()]
+        
+        return chunks[:limit]

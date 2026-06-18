@@ -6,8 +6,15 @@ class RAGEngine:
         self.vector_store = vector_store
 
     def build_prompt(self, query: str, sources: list[dict]) -> str:
-        context = "\n\n".join([f"Source: {src['metadata'].get('filename', 'unknown')}\n{src['document']}" for src in sources])
-        return f"Use the following context to answer the question. Cite source filenames.\n\nContext:\n{context}\n\nQuestion: {query}\nAnswer:"
+        context = "\n\n".join([f"--- SOURCE: {src['metadata'].get('filename', 'unknown')} ---\n{src['document']}" for src in sources])
+        return (
+            "You are the ATIP Army Intelligence AI. Use the provided context to answer the user's query accurately. "
+            "If the answer is not in the context, say you don't know based on the provided documents. "
+            "Always cite the source filenames in your answer.\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question: {query}\n"
+            "Answer:"
+        )
 
     def query(self, query: str) -> dict:
         results = self.vector_store.query(query, n_results=4)

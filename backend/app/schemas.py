@@ -51,7 +51,7 @@ class DocumentOut(BaseModel):
     filename: str
     category: str
     source: str
-    metadata: Optional[str]
+    metadata: Optional[Any]
     uploaded_at: datetime
 
 class ChatRequest(BaseModel):
