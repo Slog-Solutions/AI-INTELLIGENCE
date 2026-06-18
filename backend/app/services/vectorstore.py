@@ -1,5 +1,6 @@
 import hashlib
 import math
+from typing import Any
 
 import chromadb
 
@@ -17,6 +18,14 @@ class HashEmbeddingFunction:
         return "default"
 
     def __call__(self, input):
+        return [self.embed(text) for text in input]
+
+    def embed_query(self, input: Any) -> list[list[float]]:
+        if isinstance(input, str):
+            return [self.embed(input)]
+        return [self.embed(text) for text in input]
+
+    def embed_documents(self, input: list[str]) -> list[list[float]]:
         return [self.embed(text) for text in input]
 
     def embed(self, text: str) -> list[float]:
