@@ -37,7 +37,27 @@ def upload_file(
 
     try:
         saved_path = DocumentProcessor.save_upload(file.file, filename)
-        metadata = DocumentProcessor.extract_metadata(saved_path, filename, category, source)
+        
+        parsed_content = {}
+        if filename.lower().endswith((".xlsx", ".xls")):
+            parsed_content = DocumentProcessor.parse_excel(saved_path)
+        elif filename.lower().endswith(".csv"):
+            parsed_content = DocumentProcessor.parse_csv(saved_path)
+        elif filename.lower().endswith(".pdf"):
+            parsed_content = DocumentProcessor.parse_pdf(saved_path)
+        elif filename.lower().endswith(".docx"):
+            parsed_content = DocumentProcessor.parse_docx(saved_path)
+        
+        if "error" in parsed_content:
+            raise HTTPException(status_code=422, detail=f"Document parsing failed: {parsed_content['error']}")
+
+        chunks_with_metadata = DocumentProcessor.to_chunks(parsed_content, filename)
+        if not chunks_with_metadata:
+            raise HTTPException(status_code=400, detail="No extractable text found in uploaded file")
+
+        page_count = parsed_content.get("page_count", 0)
+        chunk_count = len(chunks_with_metadata)
+        metadata = DocumentProcessor.extract_metadata(saved_path, filename, category, source, page_count, chunk_count)
 
         document = Document(
             filename=filename,
@@ -45,64 +65,47 @@ def upload_file(
             category=category,
             uploader_id=current_user.id,
             metadata_json=json.dumps(metadata),
-            status="processing"
+            status="processing",
+            page_count=page_count,
+            chunk_count=chunk_count,
         )
         db.add(document)
         db.commit()
         db.refresh(document)
 
-        # Parsing
-        if filename.lower().endswith((".xlsx", ".xls")):
-            parsed = DocumentProcessor.parse_excel(saved_path)
-        elif filename.lower().endswith(".csv"):
-            parsed = DocumentProcessor.parse_csv(saved_path)
-        elif filename.lower().endswith(".pdf"):
-            parsed = DocumentProcessor.parse_pdf(saved_path)
-        elif filename.lower().endswith(".docx"):
-            parsed = DocumentProcessor.parse_docx(saved_path)
-        
-        # Generate Preview
-        preview = DocumentProcessor.generate_preview(parsed)
+        preview = DocumentProcessor.generate_preview(parsed_content)
         document.preview_json = json.dumps(preview)
         
-        # Generate Chunks
-        text_chunks = DocumentProcessor.to_chunks(parsed)
-        if not text_chunks:
-            document.status = "empty"
-            db.commit()
-            raise HTTPException(status_code=400, detail="No extractable text found in uploaded file")
-
-        # Generate Summary using AI
         vector_store = VectorStore()
         rag = RAGEngine(vector_store)
-        # Use first few chunks for summary context
-        summary_context = "\n".join(text_chunks[:3])
+        summary_context = "\n".join([c["content"] for c in chunks_with_metadata[:3]])
         document.summary = rag.summarize_document(filename, summary_context)
 
-        # Vector Store Upsert
-        ids = [f"{document.id}-{i}" for i in range(len(text_chunks))]
-        chunk_metadatas = [
-            {
+        ids = [f"{document.id}-{i}" for i in range(len(chunks_with_metadata))]
+        chunk_texts = [c["content"] for c in chunks_with_metadata]
+        chunk_metadatas_for_vectorstore = []
+        for i, chunk_data in enumerate(chunks_with_metadata):
+            chunk_metadata = {
                 "document_id": document.id,
                 "filename": filename,
                 "original_filename": filename,
                 **metadata,
+                **chunk_data["metadata"],
             }
-            for i in range(len(text_chunks))
-        ]
+            chunk_metadatas_for_vectorstore.append(chunk_metadata)
+
         vector_store.add_documents(
-            texts=text_chunks,
-            metadatas=chunk_metadatas,
+            texts=chunk_texts,
+            metadatas=chunk_metadatas_for_vectorstore,
             ids=ids,
         )
 
-        # Save Chunks to DB
-        for i, chunk_text in enumerate(text_chunks):
+        for i, chunk_data in enumerate(chunks_with_metadata):
             db.add(
                 DocumentChunk(
                     document_id=document.id,
-                    chunk_text=chunk_text,
-                    metadata_json=json.dumps(chunk_metadatas[i]),
+                    chunk_text=chunk_data["content"],
+                    metadata_json=json.dumps(chunk_metadatas_for_vectorstore[i]),
                     embedding_id=ids[i],
                 )
             )
@@ -121,8 +124,15 @@ def upload_file(
             status=document.status,
             summary=document.summary,
             preview=preview,
+            page_count=document.page_count,
+            chunk_count=document.chunk_count,
             uploaded_at=document.uploaded_at,
         )
+    except HTTPException as he:
+        if 'document' in locals():
+            document.status = "error"
+            db.commit()
+        raise he
     except Exception as e:
         logger.error(f"Upload Error: {str(e)}")
         if 'document' in locals():

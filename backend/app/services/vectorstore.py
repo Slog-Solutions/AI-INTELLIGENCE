@@ -1,50 +1,38 @@
-import hashlib
 import math
-from typing import Any
+from typing import Any, List
 
 import chromadb
+from sentence_transformers import SentenceTransformer
 
 from ..config import VECTOR_DIR
 
 
-class HashEmbeddingFunction:
-    """Small deterministic offline embedding function for validation and local use."""
+class SentenceTransformerEmbeddingFunction:
+    """Sentence-transformer based embedding function for offline RAG."""
 
-    def __init__(self, dimensions: int = 384):
-        self.dimensions = dimensions
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+        self.model = SentenceTransformer(model_name)
+        self.dimensions = self.model.get_sentence_embedding_dimension()
 
     @staticmethod
     def name() -> str:
-        return "default"
+        return "sentence_transformer"
 
-    def __call__(self, input):
-        return [self.embed(text) for text in input]
+    def __call__(self, input: List[str]) -> List[List[float]]:
+        return self.model.encode(input).tolist()
 
-    def embed_query(self, input: Any) -> list[list[float]]:
+    def embed_query(self, input: Any) -> List[List[float]]:
         if isinstance(input, str):
-            return [self.embed(input)]
-        return [self.embed(text) for text in input]
+            return self.model.encode([input]).tolist()
+        return self.model.encode(input).tolist()
 
-    def embed_documents(self, input: list[str]) -> list[list[float]]:
-        return [self.embed(text) for text in input]
-
-    def embed(self, text: str) -> list[float]:
-        vector = [0.0] * self.dimensions
-        tokens = [token.strip(".,:;!?()[]{}\"'").lower() for token in text.split()]
-        for token in tokens:
-            if not token:
-                continue
-            digest = hashlib.sha256(token.encode("utf-8")).digest()
-            index = int.from_bytes(digest[:4], "big") % self.dimensions
-            sign = 1.0 if digest[4] % 2 == 0 else -1.0
-            vector[index] += sign
-        norm = math.sqrt(sum(value * value for value in vector)) or 1.0
-        return [value / norm for value in vector]
+    def embed_documents(self, input: List[str]) -> List[List[float]]:
+        return self.model.encode(input).tolist()
 
 
 class VectorStore:
     def __init__(self, collection_name: str = "atip_documents"):
-        self.embedding_function = HashEmbeddingFunction()
+        self.embedding_function = SentenceTransformerEmbeddingFunction()
         self.client = chromadb.PersistentClient(path=str(VECTOR_DIR))
         self.collection = self.client.get_or_create_collection(
             name=collection_name,
@@ -52,7 +40,7 @@ class VectorStore:
             metadata={"hnsw:space": "cosine"},
         )
 
-    def add_documents(self, texts: list[str], metadatas: list[dict], ids: list[str]):
+    def add_documents(self, texts: List[str], metadatas: List[dict], ids: List[str]):
         if not texts:
             return
         self.collection.upsert(documents=texts, metadatas=metadatas, ids=ids)

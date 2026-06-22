@@ -3,7 +3,7 @@ from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, T
 from sqlalchemy.orm import relationship
 from ..db.base import Base
 
-class Role(Base):
+class Role(Base ):
     __tablename__ = "roles"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(64), unique=True, nullable=False)
@@ -52,6 +52,8 @@ class Document(Base):
     uploader_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
     metadata_json = Column("metadata", Text, nullable=True)
+    page_count = Column(Integer, nullable=True)
+    chunk_count = Column(Integer, nullable=True)
     status = Column(String(64), default="uploaded")
     summary = Column(Text, nullable=True)
     preview_json = Column("preview", Text, nullable=True)

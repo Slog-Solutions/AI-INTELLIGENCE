@@ -5,6 +5,8 @@ const api = axios.create({
   baseURL: "http://localhost:8000",
   // Let axios set Content-Type automatically for FormData
   headers: {},
+  // Increased timeout for slow AI responses (3 minutes)
+  timeout: 180000,
 });
 
 api.interceptors.request.use((config) => {

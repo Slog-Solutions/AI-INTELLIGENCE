@@ -1,6 +1,6 @@
 from datetime import datetime
 from pydantic import BaseModel, ConfigDict, EmailStr
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 
 class TokenPayload(BaseModel):
     sub: str
@@ -47,6 +47,8 @@ class DocumentUploadResponse(BaseModel):
     status: str
     summary: Optional[str] = None
     preview: Optional[Any] = None
+    page_count: Optional[int] = None
+    chunk_count: Optional[int] = None
     uploaded_at: datetime
 
 class DocumentOut(BaseModel):
@@ -58,6 +60,8 @@ class DocumentOut(BaseModel):
     summary: Optional[str] = None
     preview: Optional[Any] = None
     metadata: Optional[Any] = None
+    page_count: Optional[int] = None
+    chunk_count: Optional[int] = None
     uploaded_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -65,7 +69,12 @@ class DocumentOut(BaseModel):
 class ChatRequest(BaseModel):
     query: str
 
+class SourceCitation(BaseModel):
+    filename: str
+    page_number: Optional[int] = None
+
 class ChatResponse(BaseModel):
     answer: str
-    sources: List[str] = []
+    sources: List[SourceCitation] = []
+    confidence: Optional[str] = None
     thought: Optional[str] = None

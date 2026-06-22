@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 from uuid import uuid4
 import pandas as pd
-import pdfplumber
+import fitz  # PyMuPDF
 from docx import Document as DocxDocument
 from ..config import UPLOAD_DIR
 
@@ -25,7 +25,7 @@ class DocumentProcessor:
         return str(target_path)
 
     @staticmethod
-    def extract_metadata(path: str, original_filename: str, category: str, source: str) -> Dict[str, Any]:
+    def extract_metadata(path: str, original_filename: str, category: str, source: str, page_count: int = 0, chunk_count: int = 0) -> Dict[str, Any]:
         file_path = Path(path)
         return {
             "original_filename": Path(original_filename).name,
@@ -34,6 +34,8 @@ class DocumentProcessor:
             "category": category,
             "source": source,
             "size_bytes": file_path.stat().st_size,
+            "page_count": page_count,
+            "chunk_count": chunk_count,
         }
 
     @staticmethod
@@ -42,12 +44,12 @@ class DocumentProcessor:
         if parsed["type"] == "excel":
             preview = {}
             for sheet, data in parsed["sheets"].items():
-                preview[sheet] = data[:10]  # First 10 rows
+                preview[sheet] = data[:10]
             return {"type": "excel", "data": preview}
         elif parsed["type"] == "csv":
             return {"type": "csv", "data": parsed["rows"][:10]}
         elif parsed["type"] == "pdf":
-            return {"type": "pdf", "data": parsed["text"][:1000]}
+            return {"type": "pdf", "data": parsed["full_text"][:1000]}
         elif parsed["type"] == "docx":
             return {"type": "docx", "data": "\n".join(parsed["paragraphs"][:10])}
         return {"type": "unknown", "data": ""}
@@ -68,14 +70,20 @@ class DocumentProcessor:
 
     @staticmethod
     def parse_pdf(path: str) -> Dict[str, Any]:
-        text = []
-        tables = []
-        with pdfplumber.open(path) as pdf:
-            for page in pdf.pages:
-                text.append(page.extract_text() or "")
-                page_tables = [table.extract() for table in page.find_tables()]
-                tables.extend(page_tables)
-        return {"type": "pdf", "text": "\n".join(text), "tables": tables}
+        full_text = []
+        page_texts = []
+        page_count = 0
+        try:
+            with fitz.open(path) as doc:
+                page_count = doc.page_count
+                for page_num in range(page_count):
+                    page = doc.load_page(page_num)
+                    text = page.get_text("text")
+                    full_text.append(text)
+                    page_texts.append(text)
+            return {"type": "pdf", "full_text": "\n".join(full_text), "page_texts": page_texts, "page_count": page_count}
+        except Exception as e:
+            return {"type": "pdf", "full_text": "", "page_texts": [], "page_count": 0, "error": str(e)}
 
     @staticmethod
     def parse_docx(path: str) -> Dict[str, Any]:
@@ -90,8 +98,9 @@ class DocumentProcessor:
         return {"type": "docx", "paragraphs": paragraphs, "tables": tables}
 
     @staticmethod
-    def to_chunks(parsed: Dict[str, Any], limit: int = 1000) -> List[str]:
-        chunks = []
+    def to_chunks(parsed: Dict[str, Any], original_filename: str, chunk_size: int = 1000, chunk_overlap: int = 200) -> List[Dict[str, Any]]:
+        chunks_with_metadata = []
+
         if parsed["type"] in ["excel", "csv"]:
             rows = []
             if parsed["type"] == "excel":
@@ -102,38 +111,111 @@ class DocumentProcessor:
                 for record in parsed["rows"]:
                     rows.append(f"Data: {json.dumps(record)}")
             
-            # Group rows into larger chunks to provide context
-            current_chunk = []
+            current_chunk_text = []
             current_len = 0
-            for row in rows:
-                if current_len + len(row) > 1500:
-                    chunks.append("\n".join(current_chunk))
-                    current_chunk = [row]
-                    current_len = len(row)
+            for i, row in enumerate(rows):
+                row_len = len(row)
+                if current_len + row_len > chunk_size and current_chunk_text:
+                    chunks_with_metadata.append({
+                        "content": "\n".join(current_chunk_text),
+                        "metadata": {
+                            "source": original_filename,
+                            "chunk_index": len(chunks_with_metadata),
+                            "document_type": parsed["type"],
+                        }
+                    })
+                    overlap_rows = []
+                    overlap_len = 0
+                    for j in range(len(current_chunk_text) - 1, -1, -1):
+                        if overlap_len + len(current_chunk_text[j]) <= chunk_overlap:
+                            overlap_rows.insert(0, current_chunk_text[j])
+                            overlap_len += len(current_chunk_text[j])
+                        else:
+                            break
+                    current_chunk_text = overlap_rows + [row]
+                    current_len = overlap_len + row_len
                 else:
-                    current_chunk.append(row)
-                    current_len += len(row)
-            if current_chunk:
-                chunks.append("\n".join(current_chunk))
+                    current_chunk_text.append(row)
+                    current_len += row_len
+            if current_chunk_text:
+                chunks_with_metadata.append({
+                    "content": "\n".join(current_chunk_text),
+                    "metadata": {
+                        "source": original_filename,
+                        "chunk_index": len(chunks_with_metadata),
+                        "document_type": parsed["type"],
+                    }
+                })
 
         elif parsed["type"] == "pdf":
-            text = parsed["text"]
-            # Split by double newline for paragraphs
-            paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-            for p in paragraphs:
-                if len(p) > 1500:
-                    # Sub-chunking long paragraphs
-                    for i in range(0, len(p), 1200):
-                        chunks.append(p[i:i+1500])
-                else:
-                    chunks.append(p)
-        
+            for page_num, page_text in enumerate(parsed["page_texts"]):
+                paragraphs = [p.strip() for p in page_text.split("\n\n") if p.strip()]
+                current_chunk_text = []
+                current_len = 0
+                for para in paragraphs:
+                    para_len = len(para)
+                    if current_len + para_len > chunk_size and current_chunk_text:
+                        chunks_with_metadata.append({
+                            "content": "\n".join(current_chunk_text),
+                            "metadata": {
+                                "source": original_filename,
+                                "page_number": page_num + 1,
+                                "chunk_index": len(chunks_with_metadata),
+                                "document_type": parsed["type"],
+                            }
+                        })
+                        overlap_text = current_chunk_text[-1][-chunk_overlap:] if current_chunk_text else ""
+                        current_chunk_text = [overlap_text + para] if overlap_text else [para]
+                        current_len = len(current_chunk_text[0])
+                    else:
+                        current_chunk_text.append(para)
+                        current_len += para_len
+                if current_chunk_text:
+                    chunks_with_metadata.append({
+                        "content": "\n".join(current_chunk_text),
+                        "metadata": {
+                            "source": original_filename,
+                            "page_number": page_num + 1,
+                            "chunk_index": len(chunks_with_metadata),
+                            "document_type": parsed["type"],
+                        }
+                    })
+
         elif parsed["type"] == "docx":
-            for p in parsed["paragraphs"]:
-                if len(p) > 1500:
-                    for i in range(0, len(p), 1200):
-                        chunks.append(p[i:i+1500])
+            current_chunk_text = []
+            current_len = 0
+            for i, p in enumerate(parsed["paragraphs"]):
+                p_len = len(p)
+                if current_len + p_len > chunk_size and current_chunk_text:
+                    chunks_with_metadata.append({
+                        "content": "\n".join(current_chunk_text),
+                        "metadata": {
+                            "source": original_filename,
+                            "chunk_index": len(chunks_with_metadata),
+                            "document_type": parsed["type"],
+                        }
+                    })
+                    overlap_paras = []
+                    overlap_len = 0
+                    for j in range(len(current_chunk_text) - 1, -1, -1):
+                        if overlap_len + len(current_chunk_text[j]) <= chunk_overlap:
+                            overlap_paras.insert(0, current_chunk_text[j])
+                            overlap_len += len(current_chunk_text[j])
+                        else:
+                            break
+                    current_chunk_text = overlap_paras + [p]
+                    current_len = overlap_len + p_len
                 else:
-                    chunks.append(p)
+                    current_chunk_text.append(p)
+                    current_len += p_len
+            if current_chunk_text:
+                chunks_with_metadata.append({
+                    "content": "\n".join(current_chunk_text),
+                    "metadata": {
+                        "source": original_filename,
+                        "chunk_index": len(chunks_with_metadata),
+                        "document_type": parsed["type"],
+                    }
+                })
         
-        return chunks[:limit]
+        return chunks_with_metadata
