@@ -130,6 +130,7 @@ export default function DocumentsPage() {
               </div>
               <div className="document-card__actions">
                 <button onClick={() => openDetail(document, "preview")}><Icon name="eye" size={15} />View</button>
+                <button onClick={() => navigate(`/documents/${document.id}/analytics`)}><Icon name="analytics" size={15} />Analytics</button>
                 <button onClick={() => openDetail(document, "summary")}><Icon name="spark" size={15} />Analyze</button>
                 <button className="danger" onClick={() => removeDocument(document)} aria-label={`Delete ${document.filename}`}><Icon name="trash" size={15} /></button>
               </div>

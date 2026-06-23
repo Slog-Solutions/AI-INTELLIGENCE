@@ -60,6 +60,7 @@ class DocumentOut(BaseModel):
     summary: Optional[str] = None
     preview: Optional[Any] = None
     metadata: Optional[Any] = None
+    analytics: Optional[Any] = None
     page_count: Optional[int] = None
     chunk_count: Optional[int] = None
     uploaded_at: datetime
@@ -68,6 +69,7 @@ class DocumentOut(BaseModel):
 
 class ChatRequest(BaseModel):
     query: str
+    conversation_id: Optional[int] = None
 
 class SourceCitation(BaseModel):
     filename: str
@@ -78,3 +80,34 @@ class ChatResponse(BaseModel):
     sources: List[SourceCitation] = []
     confidence: Optional[str] = None
     thought: Optional[str] = None
+    conversation_id: Optional[int] = None
+
+class MessageOut(BaseModel):
+    id: int
+    role: str
+    content: str
+    sources: Optional[List[SourceCitation]] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class ConversationOut(BaseModel):
+    id: int
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    messages: List[MessageOut] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+class ConversationCreate(BaseModel):
+    title: str
+
+class FileStatus(BaseModel):
+    filename: str
+    status: str
+    document_id: Optional[int] = None
+    error: Optional[str] = None
+
+class MultiUploadResponse(BaseModel):
+    files: List[FileStatus]

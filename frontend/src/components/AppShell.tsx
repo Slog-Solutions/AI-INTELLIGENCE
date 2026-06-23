@@ -3,6 +3,7 @@ import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { clearAuthSession, getAuthUser } from "../services/auth";
 import Icon, { type IconName } from "./Icons";
 import { BrandMark } from "./Ui";
+import { chatApi } from "../services/api";
 
 const navigation: Array<{ to: string; label: string; icon: IconName }> = [
   { to: "/assistant", label: "New Chat", icon: "message" },
@@ -11,20 +12,44 @@ const navigation: Array<{ to: string; label: string; icon: IconName }> = [
   { to: "/upload", label: "Upload Center", icon: "upload" },
 ];
 
-const recentConversations = [
-  "Training readiness overview",
-  "Field exercise assessment",
-  "Logistics risk indicators",
-];
-
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const user = getAuthUser();
   const navigate = useNavigate();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const [recentConversations, setRecentConversations] = useState<any[]>([]);
 
   useEffect(() => setSidebarOpen(false), [location.pathname]);
+
+  useEffect(() => {
+    loadConversations();
+  }, [location.pathname]); // Reload when navigating
+
+  const loadConversations = async () => {
+    try {
+      const response = await chatApi.getConversations();
+      setRecentConversations(response.data);
+    } catch (error) {
+      console.error("Failed to load conversations", error);
+    }
+  };
+
+  const deleteConversation = async (e: React.MouseEvent, id: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (confirm("Delete this conversation?")) {
+      try {
+        await chatApi.deleteConversation(id);
+        setRecentConversations(prev => prev.filter(c => c.id !== id));
+        if (location.search.includes(`c=${id}`)) {
+          navigate("/assistant");
+        }
+      } catch (error) {
+        console.error("Failed to delete chat", error);
+      }
+    }
+  };
 
   const logout = () => {
     clearAuthSession();
@@ -32,7 +57,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   };
 
   const filteredRecent = recentConversations.filter((item) =>
-    item.toLowerCase().includes(search.toLowerCase()),
+    item.title.toLowerCase().includes(search.toLowerCase()),
   );
 
   return (
@@ -69,7 +94,15 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           </label>
           <div className="recent-list">
             {filteredRecent.map((item) => (
-              <button key={item} onClick={() => navigate("/assistant")}><Icon name="message" size={15} /><span>{item}</span></button>
+              <div key={item.id} className="recent-item-row">
+                <button onClick={() => navigate(`/assistant?c=${item.id}`)} className={location.search.includes(`c=${item.id}`) ? "active" : ""}>
+                  <Icon name="message" size={15} />
+                  <span>{item.title}</span>
+                </button>
+                <button className="delete-action" onClick={(e) => deleteConversation(e, item.id)}>
+                  <Icon name="close" size={12} />
+                </button>
+              </div>
             ))}
             {!filteredRecent.length && <p>No matching conversations</p>}
           </div>

@@ -4,6 +4,7 @@ import DashboardPage from "./pages/DashboardPage";
 import UploadPage from "./pages/UploadPage";
 import DocumentsPage from "./pages/DocumentsPage";
 import ChatPage from "./pages/ChatPage";
+import AnalyticsDetailPage from "./pages/AnalyticsDetailPage";
 import ProtectedRoute from "./components/ProtectedRoute";
 import NotFoundPage from "./pages/NotFoundPage";
 import AppShell from "./components/AppShell";
@@ -36,6 +37,10 @@ function App() {
         <Route
           path="/assistant"
           element={<SecuredPage><ChatPage /></SecuredPage>}
+        />
+        <Route
+          path="/documents/:id/analytics"
+          element={<SecuredPage><AnalyticsDetailPage /></SecuredPage>}
         />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>

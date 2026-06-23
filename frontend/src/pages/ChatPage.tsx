@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import api from "../services/api";
+import { useSearchParams } from "react-router-dom";
+import api, { chatApi } from "../services/api";
 import Icon from "../components/Icons";
 
 interface Message {
   role: "user" | "assistant";
   content: string;
-  sources?: string[];
+  sources?: { filename: string; page_number?: number }[];
   error?: boolean;
 }
 
@@ -27,32 +28,72 @@ function renderMessage(content: string) {
 }
 
 export default function ChatPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const conversationIdParam = searchParams.get("c");
+
   const [query, setQuery] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [attachment, setAttachment] = useState<File | null>(null);
   const [copied, setCopied] = useState<number | null>(null);
+  const [conversationId, setConversationId] = useState<number | null>(
+    conversationIdParam ? parseInt(conversationIdParam) : null
+  );
+
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    if (conversationIdParam) {
+      const id = parseInt(conversationIdParam);
+      setConversationId(id);
+      loadConversation(id);
+    } else {
+      setConversationId(null);
+      setMessages([]);
+    }
+  }, [conversationIdParam]);
+
+  useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
+  const loadConversation = async (id: number) => {
+    try {
+      const response = await chatApi.getConversation(id);
+      setMessages(response.data.messages);
+    } catch (error) {
+      console.error("Failed to load conversation", error);
+    }
+  };
+
   const submitQuery = async () => {
-    if (!query.trim() || loading) return;
+    if ((!query.trim() && !attachment) || loading) return;
     const userQuery = query.trim();
     setQuery("");
-    setMessages((current) => [...current, { role: "user", content: userQuery }]);
+    setMessages((current) => [...current, { role: "user", content: userQuery || "Analyze attached file" }]);
     setLoading(true);
+
     try {
-      const response = await api.post("/chat/query", { query: userQuery });
+      let response;
+      if (attachment) {
+        response = await chatApi.queryWithFile(userQuery || "Analyze this file", attachment);
+        setAttachment(null);
+      } else {
+        response = await chatApi.queryChat(userQuery, conversationId || undefined);
+      }
+
+      if (response.data.conversation_id && !conversationId) {
+        setConversationId(response.data.conversation_id);
+        setSearchParams({ c: response.data.conversation_id.toString() });
+      }
+
       setMessages((current) => [...current, {
         role: "assistant",
         content: response.data?.answer || "The intelligence engine returned no written assessment.",
-        sources: Array.isArray(response.data?.sources) ? response.data.sources : [],
+        sources: response.data?.sources || [],
       }]);
     } catch {
       setMessages((current) => [...current, {
@@ -62,7 +103,6 @@ export default function ChatPage() {
       }]);
     } finally {
       setLoading(false);
-      setAttachment(null);
     }
   };
 
@@ -118,7 +158,11 @@ export default function ChatPage() {
                   {message.sources && message.sources.length > 0 && (
                     <div className="source-citations">
                       <span><Icon name="library" size={14} />Source citations</span>
-                      <div>{message.sources.map((source, sourceIndex) => <button key={`${source}-${sourceIndex}`}>[{sourceIndex + 1}] {source}</button>)}</div>
+                      <div>{message.sources.map((source, sourceIndex) => (
+                        <button key={sourceIndex}>
+                          [{sourceIndex + 1}] {source.filename} {source.page_number ? `(p. ${source.page_number})` : ""}
+                        </button>
+                      ))}</div>
                     </div>
                   )}
                   {message.role === "assistant" && (
@@ -162,14 +206,14 @@ export default function ChatPage() {
                 submitQuery();
               }
             }}
-            placeholder="Ask ATIP about your intelligence documents..."
+            placeholder={attachment ? "Ask a question about this file..." : "Ask ATIP about your intelligence documents..."}
             rows={1}
           />
           <div className="composer__actions">
             <input ref={fileRef} type="file" hidden onChange={(event) => acceptFile(event.target.files?.[0])} />
             <button className="icon-button" onClick={() => fileRef.current?.click()} aria-label="Attach document"><Icon name="attach" /></button>
             <span>Enter to send · Shift + Enter for new line</span>
-            <button className="send-button" disabled={!query.trim() || loading} onClick={submitQuery} aria-label="Send message"><Icon name="send" size={17} /></button>
+            <button className="send-button" disabled={(!query.trim() && !attachment) || loading} onClick={submitQuery} aria-label="Send message"><Icon name="send" size={17} /></button>
           </div>
         </div>
         <p className="composer-note">ATIP can make mistakes. Validate critical intelligence against primary sources.</p>

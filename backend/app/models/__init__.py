@@ -39,9 +39,12 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     role = relationship("Role", back_populates="users")
     department = relationship("Department", back_populates="users")
-    unit = relationship("Unit", back_populates="users")
-    documents = relationship("Document", back_populates="uploader")
     audit_logs = relationship("AuditLog", back_populates="user")
+    documents = relationship("Document", back_populates="uploader")
+    conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
+    audit_logs = relationship("AuditLog", back_populates="user")
+    unit = relationship("Unit", back_populates="users")
+    
 
 class Document(Base):
     __tablename__ = "documents"
@@ -57,6 +60,7 @@ class Document(Base):
     status = Column(String(64), default="uploaded")
     summary = Column(Text, nullable=True)
     preview_json = Column("preview", Text, nullable=True)
+    analytics_json = Column("analytics", Text, nullable=True)
     uploader = relationship("User", back_populates="documents")
     chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
 
@@ -68,6 +72,26 @@ class DocumentChunk(Base):
     metadata_json = Column("metadata", Text, nullable=True)
     embedding_id = Column(String(255), nullable=True)
     document = relationship("Document", back_populates="chunks")
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(255), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    user = relationship("User", back_populates="conversations")
+    messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
+
+class Message(Base):
+    __tablename__ = "messages"
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False)
+    role = Column(String(50), nullable=False)  # 'user' or 'assistant'
+    content = Column(Text, nullable=False)
+    sources_json = Column("sources", Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    conversation = relationship("Conversation", back_populates="messages")
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
@@ -88,4 +112,6 @@ __all__ = [
     "Role",
     "Unit",
     "User",
+    "Conversation",
+    "Message",
 ]
