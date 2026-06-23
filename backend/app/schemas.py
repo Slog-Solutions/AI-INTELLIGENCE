@@ -1,0 +1,80 @@
+from datetime import datetime
+from pydantic import BaseModel, ConfigDict, EmailStr
+from typing import Optional, List, Any, Dict
+
+class TokenPayload(BaseModel):
+    sub: str
+    exp: int
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+class LoginResponse(TokenResponse):
+    user: "UserOut"
+
+class UserCreate(BaseModel):
+    username: str
+    email: EmailStr
+    password: str
+    full_name: Optional[str] = None
+    role: str
+    department_id: Optional[int] = None
+    unit_id: Optional[int] = None
+
+class UserOut(BaseModel):
+    id: int
+    username: str
+    email: EmailStr
+    full_name: Optional[str]
+    role: str
+    department_id: Optional[int]
+    unit_id: Optional[int]
+    is_active: bool
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class DocumentUploadResponse(BaseModel):
+    id: int
+    filename: str
+    category: str
+    source: str
+    status: str
+    summary: Optional[str] = None
+    preview: Optional[Any] = None
+    page_count: Optional[int] = None
+    chunk_count: Optional[int] = None
+    uploaded_at: datetime
+
+class DocumentOut(BaseModel):
+    id: int
+    filename: str
+    category: str
+    source: str
+    status: str
+    summary: Optional[str] = None
+    preview: Optional[Any] = None
+    metadata: Optional[Any] = None
+    page_count: Optional[int] = None
+    chunk_count: Optional[int] = None
+    uploaded_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class ChatRequest(BaseModel):
+    query: str
+
+class SourceCitation(BaseModel):
+    filename: str
+    page_number: Optional[int] = None
+
+class ChatResponse(BaseModel):
+    answer: str
+    sources: List[SourceCitation] = []
+    confidence: Optional[str] = None
+    thought: Optional[str] = None
