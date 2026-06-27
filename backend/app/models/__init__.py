@@ -3,12 +3,14 @@ from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, T
 from sqlalchemy.orm import relationship
 from ..db.base import Base
 
-class Role(Base ):
+
+class Role(Base):
     __tablename__ = "roles"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(64), unique=True, nullable=False)
     description = Column(String(255), nullable=True)
     users = relationship("User", back_populates="role")
+
 
 class Department(Base):
     __tablename__ = "departments"
@@ -17,6 +19,7 @@ class Department(Base):
     units = relationship("Unit", back_populates="department")
     users = relationship("User", back_populates="department")
 
+
 class Unit(Base):
     __tablename__ = "units"
     id = Column(Integer, primary_key=True, index=True)
@@ -24,6 +27,7 @@ class Unit(Base):
     department_id = Column(Integer, ForeignKey("departments.id"), nullable=False)
     department = relationship("Department", back_populates="units")
     users = relationship("User", back_populates="unit")
+
 
 class User(Base):
     __tablename__ = "users"
@@ -39,12 +43,12 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     role = relationship("Role", back_populates="users")
     department = relationship("Department", back_populates="users")
+    unit = relationship("Unit", back_populates="users")
+    # FIX: removed duplicate audit_logs relationship definition
     audit_logs = relationship("AuditLog", back_populates="user")
     documents = relationship("Document", back_populates="uploader")
     conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
-    audit_logs = relationship("AuditLog", back_populates="user")
-    unit = relationship("Unit", back_populates="users")
-    
+
 
 class Document(Base):
     __tablename__ = "documents"
@@ -64,6 +68,7 @@ class Document(Base):
     uploader = relationship("User", back_populates="documents")
     chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
 
+
 class DocumentChunk(Base):
     __tablename__ = "document_chunks"
     id = Column(Integer, primary_key=True, index=True)
@@ -73,6 +78,7 @@ class DocumentChunk(Base):
     embedding_id = Column(String(255), nullable=True)
     document = relationship("Document", back_populates="chunks")
 
+
 class Conversation(Base):
     __tablename__ = "conversations"
     id = Column(Integer, primary_key=True, index=True)
@@ -81,17 +87,23 @@ class Conversation(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     user = relationship("User", back_populates="conversations")
-    messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
+    messages = relationship(
+        "Message", back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="Message.created_at",
+    )
+
 
 class Message(Base):
     __tablename__ = "messages"
     id = Column(Integer, primary_key=True, index=True)
     conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False)
-    role = Column(String(50), nullable=False)  # 'user' or 'assistant'
+    role = Column(String(50), nullable=False)   # 'user' or 'assistant'
     content = Column(Text, nullable=False)
     sources_json = Column("sources", Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     conversation = relationship("Conversation", back_populates="messages")
+
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
@@ -102,6 +114,7 @@ class AuditLog(Base):
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     user = relationship("User", back_populates="audit_logs")
+
 
 __all__ = [
     "AuditLog",

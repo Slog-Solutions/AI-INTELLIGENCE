@@ -1,3 +1,4 @@
+
 """
 ATIP Enterprise VectorStore
 ==============================
@@ -44,6 +45,8 @@ from chromadb import EmbeddingFunction, Documents, Embeddings
 from rank_bm25 import BM25Okapi
 
 from ..config import VECTOR_DIR, EMBEDDING_MODEL
+from ..db.session import SessionLocal
+from ..models import DocumentChunk
 
 logger = logging.getLogger(__name__)
 
@@ -397,6 +400,9 @@ class BM25Index:
 # ─────────────────────────────────────────────
 # Enterprise VectorStore
 # ─────────────────────────────────────────────
+_VECTOR_STORE_INSTANCES: Dict[str, 'VectorStore'] = {}
+_VECTOR_STORE_LOCK = threading.Lock()
+
 class VectorStore:
     """
     Thin façade over ChromaDB + BM25.
@@ -414,31 +420,132 @@ class VectorStore:
     without re-initialising or reloading anything.
     """
 
+    def __new__(cls, collection_name: str = "atip_documents"):
+        with _VECTOR_STORE_LOCK:
+            if collection_name not in _VECTOR_STORE_INSTANCES:
+                instance = super().__new__(cls)
+                instance._initialized = False
+                _VECTOR_STORE_INSTANCES[collection_name] = instance
+            return _VECTOR_STORE_INSTANCES[collection_name]
+
     def __init__(self, collection_name: str = "atip_documents"):
+        if self._initialized:
+            return
+
+        self.collection_name = collection_name
         # Reuse the singleton embedding function (loads model on first call).
         self.embedding_fn = BGEEmbeddingFunction(EMBEDDING_MODEL)
         # Reuse the singleton ChromaDB client.
         self.client = _get_chroma_client()
 
-        try:
-            self.collection = self.client.get_or_create_collection(
-                name=collection_name,
-                embedding_function=self.embedding_fn,
-                metadata={"hnsw:space": "cosine"},
-            )
-            logger.debug(
-                f"Collection '{collection_name}' ready "
-                f"({self.collection.count()} chunks)"
-            )
-        except Exception as exc:
-            logger.error(
-                f"Failed to get/create ChromaDB collection '{collection_name}': {exc}",
-                exc_info=True,
-            )
-            raise
-
         self._bm25 = BM25Index()
         self._bm25_dirty = True
+
+        self._ensure_collection_dimension()
+        self._initialized = True
+
+    def _ensure_collection_dimension(self):
+        expected_dim = self.embedding_fn.dimensions
+        logger.info(f"Detected current embedding model dimension: {expected_dim}")
+
+        try:
+            # Try to get the collection to check its dimension
+            existing_collection = self.client.get_collection(name=self.collection_name)
+            
+            # Attempt to get a single embedding to check its dimension if collection is not empty
+            if existing_collection.count() > 0:
+                # Fetch one item to check its embedding dimension
+                item = existing_collection.get(limit=1, include=['embeddings'])
+                if item and item['embeddings']:
+                    current_collection_dim = len(item['embeddings'][0])
+                    logger.info(f"Existing Chroma collection '{self.collection_name}' dimension: {current_collection_dim}")
+
+                    if current_collection_dim != expected_dim:
+                        logger.warning(
+                            f"Dimension mismatch detected for collection '{self.collection_name}'. "
+                            f"Expected: {expected_dim}, Got: {current_collection_dim}. "
+                            f"Recreating collection and re-indexing documents."
+                        )
+                        self._recreate_collection_and_reindex()
+                    else:
+                        self.collection = existing_collection
+                        logger.info(f"Collection '{self.collection_name}' ready ({self.collection.count()} chunks)")
+                else:
+                    # Collection exists but has no embeddings (might happen if only metadata/docs added)
+                    self.collection = existing_collection
+                    logger.info(f"Collection '{self.collection_name}' exists but has no embeddings. Ready.")
+            else:
+                # Collection exists but is empty, safe to use.
+                self.collection = existing_collection
+                logger.info(f"Collection '{self.collection_name}' is empty, ready for new embeddings.")
+
+        except (ValueError, Exception) as exc:
+            # ChromaDB raises ValueError if collection does not exist
+            if isinstance(exc, ValueError) and "does not exist" in str(exc):
+                logger.info(f"Collection '{self.collection_name}' not found. Creating new collection.")
+            else:
+                logger.warning(f"Error checking collection '{self.collection_name}': {exc}. Creating/Getting collection.")
+            
+            try:
+                self.collection = self.client.get_or_create_collection(
+                    name=self.collection_name,
+                    embedding_function=self.embedding_fn,
+                    metadata={"hnsw:space": "cosine"},
+                )
+                logger.info(f"Collection '{self.collection_name}' ready.")
+            except Exception as create_exc:
+                logger.error(f"FATAL: Could not get/create collection '{self.collection_name}': {create_exc}")
+                raise
+
+    def _recreate_collection_and_reindex(self):
+        logger.info(f"Deleting existing collection '{self.collection_name}' due to dimension mismatch.")
+        self.client.delete_collection(name=self.collection_name)
+        logger.info(f"Collection '{self.collection_name}' deleted.")
+
+        logger.info(f"Creating new collection '{self.collection_name}' with correct dimension {self.embedding_fn.dimensions}.")
+        self.collection = self.client.create_collection(
+            name=self.collection_name,
+            embedding_function=self.embedding_fn,
+            metadata={"hnsw:space": "cosine"},
+        )
+        logger.info(f"New collection '{self.collection_name}' created.")
+
+        # Re-indexing is only performed for the main document collection
+        if self.collection_name == "atip_documents":
+            logger.info("Starting re-indexing of all documents from PostgreSQL...")
+            db = SessionLocal()
+            try:
+                all_chunks = db.query(DocumentChunk).all()
+                if not all_chunks:
+                    logger.info("No document chunks found in PostgreSQL to re-index.")
+                    return
+
+                texts: List[str] = []
+                metadatas: List[dict] = []
+                ids: List[str] = []
+
+                for chunk in all_chunks:
+                    texts.append(chunk.chunk_text)
+                    metadatas.append(json.loads(chunk.metadata_json))
+                    ids.append(chunk.embedding_id)
+                
+                # Batch upsert to the newly created ChromaDB collection
+                BATCH_SIZE = 256
+                for i in range(0, len(ids), BATCH_SIZE):
+                    batch_texts = texts[i:i + BATCH_SIZE]
+                    batch_metadatas = metadatas[i:i + BATCH_SIZE]
+                    batch_ids = ids[i:i + BATCH_SIZE]
+                    self.add_documents(texts=batch_texts, metadatas=batch_metadatas, ids=batch_ids)
+                    logger.debug(f"Re-indexed {len(batch_ids)} chunks. Total: {i + len(batch_ids)}/{len(ids)}")
+
+                logger.info(f"Re-indexing completed. Total {len(ids)} chunks re-indexed into '{self.collection_name}'.")
+            except Exception as exc:
+                logger.error(f"Error during re-indexing: {exc}", exc_info=True)
+                # We don't raise here to allow the system to continue, though search will be empty until new uploads
+            finally:
+                db.close()
+        else:
+            logger.info(f"Skipping re-indexing for non-main collection '{self.collection_name}'.")
 
     # ── CRUD ─────────────────────────────────────────────────────────────────
 

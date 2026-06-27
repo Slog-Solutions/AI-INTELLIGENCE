@@ -3,13 +3,16 @@ ATIP Upload Router
 ===================
 Handles multi-file uploads (up to 5 simultaneously, 300+ pages each).
 Processing runs in background tasks:
-  1. Parse document (PDF/DOCX/Excel/CSV)
+  1. Parse document (PDF/DOCX/Excel/CSV/TXT)
   2. Intelligent chunking (heading/paragraph/table/sentence-overlap aware)
   3. Entity extraction (officers, ranks, units, operations, weapons…)
   4. BGE embedding + ChromaDB upsert (ALL documents share one collection)
   5. BM25 index invalidation (rebuilt lazily on next query)
   6. Generate AI summary via Ollama
   7. Persist to PostgreSQL (Document + DocumentChunk records)
+
+FIX: Only one VectorStore() instance per task (prevents double singleton init).
+FIX: TXT file support added.
 """
 
 from datetime import datetime
@@ -45,6 +48,10 @@ def get_db():
         db.close()
 
 
+# Accepted extensions (includes TXT now)
+_ACCEPTED_EXTENSIONS = (".xlsx", ".xls", ".csv", ".pdf", ".docx", ".txt")
+
+
 # ── Background Processing Task ─────────────────────────────────────────────────
 def process_document_task(
     document_id: int,
@@ -57,6 +64,9 @@ def process_document_task(
     """
     Full processing pipeline for a single uploaded document.
     Runs asynchronously via FastAPI BackgroundTasks.
+
+    Uses a SINGLE VectorStore instance for both summary generation and indexing
+    to avoid duplicate singleton initialisation overhead.
     """
     db = SessionLocal()
     document = None
@@ -82,6 +92,8 @@ def process_document_task(
             parsed_content = DocumentProcessor.parse_pdf(saved_path)
         elif ext.endswith(".docx"):
             parsed_content = DocumentProcessor.parse_docx(saved_path)
+        elif ext.endswith(".txt"):
+            parsed_content = DocumentProcessor.parse_txt(saved_path)
         else:
             document.status = "error"
             db.commit()
@@ -110,7 +122,6 @@ def process_document_task(
         # ── Step 4: Extract document-level entities ────────────────────────────
         full_text = parsed_content.get("full_text", "")
         if not full_text and parsed_content.get("type") in ("excel", "csv"):
-            # Build a text representation for entity extraction
             full_text = " ".join([c["content"] for c in chunks_with_meta[:10]])
         doc_entities = DocumentProcessor.extract_entities(full_text[:20000])
 
@@ -130,10 +141,14 @@ def process_document_task(
         analytics = AnalyticsService.generate_analytics(saved_path, filename, parsed_content)
         document.analytics_json = json.dumps(analytics)
 
-        # ── Step 6: AI Summary ────────────────────────────────────────────────
+        # ── Step 6: Prepare vector store (SINGLE INSTANCE for this task) ──────
+        # Creating it here once means both summary generation and indexing
+        # share the same singleton without any extra overhead.
+        vector_store = VectorStore()
+        rag = RAGEngine(vector_store)
+
+        # ── Step 7: AI Summary ────────────────────────────────────────────────
         try:
-            vector_store = VectorStore()
-            rag = RAGEngine(vector_store)
             summary_context = " ".join([c["content"] for c in chunks_with_meta[:5]])
             document.summary = rag.summarize_document(filename, summary_context)
             logger.info(f"Summary generated for {filename}")
@@ -141,8 +156,7 @@ def process_document_task(
             logger.warning(f"Summary generation failed for {filename}: {e}")
             document.summary = f"Summary unavailable: {e}"
 
-        # ── Step 7: Vectorise and index ────────────────────────────────────────
-        vector_store = VectorStore()
+        # ── Step 8: Vectorise and index ────────────────────────────────────────
         ids: List[str] = []
         texts: List[str] = []
         metadatas: List[dict] = []
@@ -172,7 +186,7 @@ def process_document_task(
             )
         logger.info(f"Indexed {chunk_count} chunks for {filename} (doc_id={document_id})")
 
-        # ── Step 8: Persist chunks to PostgreSQL ───────────────────────────────
+        # ── Step 9: Persist chunks to PostgreSQL ───────────────────────────────
         for i, chunk_data in enumerate(chunks_with_meta):
             db.add(DocumentChunk(
                 document_id=document_id,
@@ -225,11 +239,11 @@ async def upload_files(
     results: List[FileStatus] = []
     for file in files:
         filename = Path(file.filename).name
-        if not filename.lower().endswith((".xlsx", ".xls", ".csv", ".pdf", ".docx")):
+        if not filename.lower().endswith(_ACCEPTED_EXTENSIONS):
             results.append(FileStatus(
                 filename=filename,
                 status="error",
-                error="Unsupported file type. Accepted: PDF, DOCX, XLSX, XLS, CSV",
+                error="Unsupported file type. Accepted: PDF, DOCX, XLSX, XLS, CSV, TXT",
             ))
             continue
 

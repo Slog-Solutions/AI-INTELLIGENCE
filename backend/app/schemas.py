@@ -3,10 +3,12 @@ ATIP Pydantic Schemas
 =====================
 All request/response models for the FastAPI API.
 
-Changes vs original:
+Changes:
   - SourceCitation: added `section` field for heading-level citations
-  - ChatResponse: added `thought` field for chain-of-thought models (Qwen3, DeepSeek)
-  - DocumentOut: page_count, chunk_count already present; no changes needed
+  - ChatRequest: added `document_ids` for filtered retrieval
+  - ChatResponse: added `thought` field for chain-of-thought models
+  - ConversationRename: new schema for PATCH /chat/conversation/{id}
+  - DocumentReindexResponse: new schema for POST /documents/{id}/reindex
 """
 
 from datetime import datetime
@@ -91,6 +93,13 @@ class DocumentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class DocumentReindexResponse(BaseModel):
+    """Returned by POST /documents/{id}/reindex"""
+    document_id: int
+    status: str
+    message: str
+
+
 # ── Upload ─────────────────────────────────────────────────────────────────────
 
 class FileStatus(BaseModel):
@@ -109,6 +118,7 @@ class MultiUploadResponse(BaseModel):
 class ChatRequest(BaseModel):
     query: str
     conversation_id: Optional[int] = None
+    document_ids: Optional[List[int]] = None   # Filter to specific documents
 
 
 class SourceCitation(BaseModel):
@@ -126,8 +136,8 @@ class SourceCitation(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     sources: List[SourceCitation] = []
-    confidence: Optional[str] = None  # HIGH | MEDIUM | LOW
-    thought: Optional[str] = None     # Chain-of-thought (Qwen3 / DeepSeek)
+    confidence: Optional[str] = None   # HIGH | MEDIUM | LOW
+    thought: Optional[str] = None      # Chain-of-thought (Qwen3 / DeepSeek)
     conversation_id: Optional[int] = None
 
 
@@ -154,4 +164,9 @@ class ConversationOut(BaseModel):
 
 
 class ConversationCreate(BaseModel):
+    title: str
+
+
+class ConversationRename(BaseModel):
+    """Used by PATCH /chat/conversation/{id}"""
     title: str

@@ -10,12 +10,15 @@ Production-grade query pipeline:
   6. Structured citation output (filename, page, section)
   7. Conversation memory
   8. Configurable Ollama backend (Qwen3 14B/32B, DeepSeek R1, Llama 3.3 70B, …)
+  9. Retry logic with exponential back-off
+  10. Streaming support via generator
 """
 
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, Generator, List, Optional
 
 import requests
 from flashrank import Ranker, RerankRequest
@@ -250,11 +253,11 @@ class RAGEngine:
             structured_sources = self._build_source_list(final_chunks)
             is_cross = _is_cross_doc_query(query)
 
-            # 6. LLM call
+            # 6. LLM call with retry
             prompt = _build_rag_prompt(query, final_chunks, history=history, is_cross_doc=is_cross)
-            raw_answer = self._call_ollama(prompt)
+            raw_answer = self._call_ollama_with_retry(prompt)
 
-            # 7. Post-process: strip <think> blocks (Qwen3 / DeepSeek), extract confidence
+            # 7. Post-process: strip <think> blocks, extract confidence
             answer, thought, confidence = self._post_process(raw_answer)
 
             return {
@@ -275,12 +278,70 @@ class RAGEngine:
     def summarize_document(self, filename: str, content: str) -> str:
         try:
             prompt = _build_summary_prompt(filename, content)
-            raw = self._call_ollama(prompt)
+            raw = self._call_ollama_with_retry(prompt, max_tokens=1024)
             answer, _, _ = self._post_process(raw)
             return answer
         except Exception as e:
             logger.error(f"Summarization error: {e}")
             return "Failed to generate document summary."
+
+    def stream_query(
+        self,
+        query: str,
+        history: str = "",
+        document_ids: Optional[List[int]] = None,
+    ) -> Generator[str, None, None]:
+        """
+        Streaming RAG pipeline — yields JSON-encoded delta tokens.
+        Each yielded string is: data: <json>\n\n  (Server-Sent Events format)
+        Final event: data: [DONE]\n\n
+        """
+        try:
+            raw_results = self.vector_store.query(
+                query_text=query,
+                n_results=self.top_k_retrieve,
+                document_ids=document_ids,
+            )
+
+            if not raw_results or not raw_results.get("ids") or not raw_results["ids"][0]:
+                yield f"data: {json.dumps({'type': 'answer', 'token': 'The uploaded documents do not contain any indexed content yet.'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            passages = [
+                {
+                    "text": raw_results["documents"][0][idx],
+                    "meta": raw_results["metadatas"][0][idx],
+                    "score": 1.0 - raw_results["distances"][0][idx],
+                }
+                for idx in range(len(raw_results["ids"][0]))
+            ]
+
+            reranked = self._rerank(query, passages)
+            final_chunks = _compress_context(reranked, max_tokens=self.max_context_tokens)
+
+            if not final_chunks:
+                yield f"data: {json.dumps({'type': 'answer', 'token': 'No relevant context found.'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            structured_sources = self._build_source_list(final_chunks)
+            is_cross = _is_cross_doc_query(query)
+            prompt = _build_rag_prompt(query, final_chunks, history=history, is_cross_doc=is_cross)
+
+            # Emit sources metadata first
+            yield f"data: {json.dumps({'type': 'sources', 'sources': structured_sources})}\n\n"
+
+            # Stream tokens from Ollama
+            for token in self._stream_ollama(prompt):
+                yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+
+            yield "data: [DONE]\n\n"
+
+        except Exception as e:
+            logger.error(f"Streaming RAG error: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            yield "data: [DONE]\n\n"
 
     # ── Reranking ────────────────────────────
     def _rerank(
@@ -312,7 +373,6 @@ class RAGEngine:
 
         except Exception as e:
             logger.warning(f"Reranker failed ({e}), falling back to retrieval order.")
-            # Fallback: return top-K by original vector score
             sorted_p = sorted(passages, key=lambda x: x["score"], reverse=True)
             return [
                 {"document": p["text"], "metadata": p["meta"], "score": p["score"]}
@@ -368,7 +428,34 @@ class RAGEngine:
 
         return raw, thought, confidence
 
-    # ── Ollama Client ─────────────────────────
+    # ── Ollama Client with Retry ──────────────
+    def _call_ollama_with_retry(
+        self,
+        prompt: str,
+        max_tokens: int = 2048,
+        temperature: float = 0.05,
+        retries: int = 3,
+    ) -> str:
+        """Call Ollama with exponential back-off retry on transient errors."""
+        last_exc: Optional[Exception] = None
+        for attempt in range(retries):
+            try:
+                return self._call_ollama(prompt, max_tokens=max_tokens, temperature=temperature)
+            except Exception as exc:
+                last_exc = exc
+                error_str = str(exc).lower()
+                # Only retry on timeout or connection errors — not on Ollama model errors
+                if "timeout" in error_str or "connection" in error_str:
+                    wait = 2 ** attempt  # 1s, 2s, 4s
+                    logger.warning(
+                        f"Ollama transient error (attempt {attempt + 1}/{retries}): {exc}. "
+                        f"Retrying in {wait}s…"
+                    )
+                    time.sleep(wait)
+                else:
+                    raise
+        raise last_exc  # type: ignore[misc]
+
     def _call_ollama(
         self,
         prompt: str,
@@ -411,3 +498,52 @@ class RAGEngine:
             )
         except requests.exceptions.RequestException as e:
             raise Exception(f"Ollama request failed: {e}")
+
+    def _stream_ollama(self, prompt: str, max_tokens: int = 2048) -> Generator[str, None, None]:
+        """
+        Stream token-by-token from Ollama's /api/generate endpoint.
+        Yields individual token strings.
+        Strips <think>…</think> blocks in real-time.
+        """
+        payload = {
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": True,
+            "options": {
+                "num_predict": max_tokens,
+                "temperature": 0.05,
+                "top_p": 0.9,
+                "repeat_penalty": 1.1,
+                "think": True,
+            },
+        }
+        url = f"{OLLAMA_URL.rstrip('/')}/api/generate"
+        in_think = False
+        try:
+            with requests.post(url, json=payload, stream=True, timeout=180) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    token = data.get("response", "")
+                    # Skip <think>…</think> blocks from streaming output
+                    if "<think>" in token:
+                        in_think = True
+                    if in_think:
+                        if "</think>" in token:
+                            in_think = False
+                        continue
+                    if token:
+                        yield token
+                    if data.get("done"):
+                        break
+        except requests.exceptions.Timeout:
+            raise Exception(f"Ollama streaming timed out. Model: {OLLAMA_MODEL}")
+        except requests.exceptions.ConnectionError:
+            raise Exception(f"Cannot connect to Ollama at {OLLAMA_URL}.")
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Ollama streaming failed: {e}")

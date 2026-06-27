@@ -7,6 +7,8 @@ Production-grade document processing with:
 - Alias normalization (Captain Jatin Kumar Verma = Capt Verma = Officer Verma)
 - Large PDF support (300+ pages per document, 5 simultaneous documents)
 - Per-page and per-section metadata tracking for accurate citations
+- TXT file support (NEW)
+- Improved heading detection and overlap logic
 """
 
 import os
@@ -83,15 +85,12 @@ def _build_alias_map(entities: Dict[str, List[str]]) -> Dict[str, str]:
     alias_map = {}
     officers = entities.get("officers", [])
     for name in officers:
-        # Normalise: strip rank prefix and whitespace
         parts = name.strip().split()
-        # Collect all sub-name combos as aliases of the full name
         if len(parts) >= 2:
             for i in range(1, len(parts)):
                 alias = " ".join(parts[i:])
                 if alias and alias not in alias_map:
                     alias_map[alias.lower()] = name
-            # First name + last name
             alias_map[parts[-1].lower()] = name
     return alias_map
 
@@ -99,7 +98,6 @@ def _build_alias_map(entities: Dict[str, List[str]]) -> Dict[str, str]:
 def _extract_officer_names(text: str) -> List[str]:
     """Extract person names preceded by military ranks."""
     names = []
-    # Match Rank + Name(s)  e.g. "Captain Jatin Kumar Verma"
     pattern = re.compile(
         r'\b(?:General|Gen|Lieutenant General|Lt Gen|Major General|Maj Gen|Brigadier|Brig|'
         r'Colonel|Col|Lieutenant Colonel|Lt Col|Major|Maj|Captain|Capt|Lieutenant|Lt|'
@@ -201,9 +199,11 @@ class DocumentProcessor:
         elif parsed["type"] == "csv":
             return {"type": "csv", "data": parsed["rows"][:10]}
         elif parsed["type"] == "pdf":
-            return {"type": "pdf", "data": parsed["full_text"][:1000]}
+            return {"type": "pdf", "data": parsed["full_text"][:1500]}
         elif parsed["type"] == "docx":
             return {"type": "docx", "data": "\n".join(parsed["paragraphs"][:10])}
+        elif parsed["type"] == "txt":
+            return {"type": "txt", "data": parsed["full_text"][:1500]}
         return {"type": "unknown", "data": ""}
 
     # ── Parsers ──────────────────────────────
@@ -222,6 +222,24 @@ class DocumentProcessor:
         return {"type": "csv", "rows": df.fillna("").to_dict(orient="records")}
 
     @staticmethod
+    def parse_txt(path: str) -> Dict[str, Any]:
+        """Parse plain text files with paragraph detection."""
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            # Split into paragraphs on double newlines
+            paragraphs = [p.strip() for p in re.split(r'\n{2,}', content) if p.strip()]
+            return {
+                "type": "txt",
+                "full_text": content,
+                "paragraphs": paragraphs,
+                "page_count": max(1, len(content) // 3000),  # Approximate
+            }
+        except Exception as e:
+            logger.error(f"TXT parse error for {path}: {e}")
+            return {"type": "txt", "full_text": "", "paragraphs": [], "page_count": 0, "error": str(e)}
+
+    @staticmethod
     def parse_pdf(path: str) -> Dict[str, Any]:
         """
         Extract text from PDF page-by-page, preserving page numbers.
@@ -235,11 +253,9 @@ class DocumentProcessor:
                 page_count = doc.page_count
                 for page_num in range(page_count):
                     page = doc.load_page(page_num)
-                    # Extract blocks with positions for layout-aware chunking
                     blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
                     raw_text = page.get_text("text")
-                    
-                    # Collect headings detected on this page
+
                     headings_on_page: List[str] = []
                     for block in blocks.get("blocks", []):
                         if block.get("type") == 0:  # text block
@@ -249,11 +265,9 @@ class DocumentProcessor:
                                     span_size = span.get("size", 0)
                                     span_flags = span.get("flags", 0)
                                     is_bold = bool(span_flags & 2**4)
-                                    # Large or bold text → likely heading
-                                    if span_size >= 13 or is_bold:
-                                        if span_text and len(span_text) <= 120:
-                                            headings_on_page.append(span_text)
-                    
+                                    if (span_size >= 13 or is_bold) and span_text and len(span_text) <= 120:
+                                        headings_on_page.append(span_text)
+
                     page_texts.append({
                         "page_number": page_num + 1,
                         "text": raw_text,
@@ -275,7 +289,7 @@ class DocumentProcessor:
     def parse_docx(path: str) -> Dict[str, Any]:
         doc = DocxDocument(path)
         paragraphs: List[Dict[str, Any]] = []
-        
+
         for para in doc.paragraphs:
             text = para.text.strip()
             if not text:
@@ -287,12 +301,12 @@ class DocumentProcessor:
                 "style": style_name,
                 "is_heading": is_heading,
             })
-        
+
         tables: List[List[List[str]]] = []
         for table in doc.tables:
             rows = [[cell.text for cell in row.cells] for row in table.rows]
             tables.append(rows)
-        
+
         all_texts = [p["text"] for p in paragraphs]
         return {
             "type": "docx",
@@ -396,6 +410,8 @@ class DocumentProcessor:
             return DocumentProcessor._chunk_pdf(parsed, original_filename, chunk_size, chunk_overlap)
         elif doc_type == "docx":
             return DocumentProcessor._chunk_docx(parsed, original_filename, chunk_size, chunk_overlap)
+        elif doc_type == "txt":
+            return DocumentProcessor._chunk_txt(parsed, original_filename, chunk_size, chunk_overlap)
         return []
 
     # ── Tabular Chunking ──────────────────────
@@ -463,6 +479,74 @@ class DocumentProcessor:
 
         return chunks
 
+    # ── TXT Chunking (paragraph-aware) ───────
+    @staticmethod
+    def _chunk_txt(
+        parsed: Dict[str, Any],
+        original_filename: str,
+        chunk_size: int,
+        chunk_overlap: int,
+    ) -> List[Dict[str, Any]]:
+        chunks: List[Dict[str, Any]] = []
+        current_section = "Document Start"
+        buf: List[str] = []
+        buf_len = 0
+
+        paragraphs = parsed.get("paragraphs", [])
+        if not paragraphs:
+            # Fall back to line-based chunking
+            paragraphs = [line.strip() for line in parsed.get("full_text", "").split("\n") if line.strip()]
+
+        def flush_buf():
+            nonlocal buf, buf_len
+            if buf:
+                content = "\n\n".join(buf)
+                entities = DocumentProcessor.extract_entities(content)
+                chunks.append({
+                    "content": content,
+                    "metadata": {
+                        "source": original_filename,
+                        "section": current_section,
+                        "chunk_index": len(chunks),
+                        "document_type": "txt",
+                        "chunk_type": "text",
+                        "entities": entities,
+                    },
+                })
+                buf.clear()
+                buf_len = 0
+
+        for para in paragraphs:
+            is_heading = _is_heading(para)
+            plen = len(para)
+
+            if is_heading:
+                flush_buf()
+                current_section = para
+                buf = [para]
+                buf_len = plen
+                continue
+
+            if buf_len + plen > chunk_size and buf:
+                flush_buf()
+                # overlap from previous paragraphs
+                overlap_buf: List[str] = []
+                overlap_len = 0
+                for prev in reversed(buf):
+                    if overlap_len + len(prev) <= chunk_overlap:
+                        overlap_buf.insert(0, prev)
+                        overlap_len += len(prev)
+                    else:
+                        break
+                buf = overlap_buf + [para]
+                buf_len = overlap_len + plen
+            else:
+                buf.append(para)
+                buf_len += plen
+
+        flush_buf()
+        return chunks
+
     # ── PDF Chunking (heading-aware + sentence-overlap) ──
     @staticmethod
     def _chunk_pdf(
@@ -489,7 +573,6 @@ class DocumentProcessor:
             if not raw_text.strip():
                 continue
 
-            # Split into lines to detect headings and tables
             lines = raw_text.split("\n")
             sentences: List[str] = []
             i = 0
@@ -650,7 +733,6 @@ class DocumentProcessor:
 
         para_meta = parsed.get("paragraph_meta", [])
         if not para_meta:
-            # Fallback: treat plain paragraphs list
             para_meta = [{"text": p, "is_heading": _is_heading(p), "style": ""} for p in parsed.get("paragraphs", [])]
 
         # Process tables first: serialize them as special chunks
@@ -688,7 +770,7 @@ class DocumentProcessor:
                         "entities": entities,
                     },
                 })
-                buf = []
+                buf.clear()
                 buf_len = 0
 
         for pm in para_meta:
