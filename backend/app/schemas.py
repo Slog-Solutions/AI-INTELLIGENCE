@@ -1,17 +1,34 @@
+"""
+ATIP Pydantic Schemas
+=====================
+All request/response models for the FastAPI API.
+
+Changes vs original:
+  - SourceCitation: added `section` field for heading-level citations
+  - ChatResponse: added `thought` field for chain-of-thought models (Qwen3, DeepSeek)
+  - DocumentOut: page_count, chunk_count already present; no changes needed
+"""
+
 from datetime import datetime
 from pydantic import BaseModel, ConfigDict, EmailStr
 from typing import Optional, List, Any, Dict
+
+
+# ── Auth ────────────────────────────────────────────────────────────────────────
 
 class TokenPayload(BaseModel):
     sub: str
     exp: int
 
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
 
+
 class LoginResponse(TokenResponse):
     user: "UserOut"
+
 
 class UserCreate(BaseModel):
     username: str
@@ -21,6 +38,7 @@ class UserCreate(BaseModel):
     role: str
     department_id: Optional[int] = None
     unit_id: Optional[int] = None
+
 
 class UserOut(BaseModel):
     id: int
@@ -35,9 +53,13 @@ class UserOut(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+# ── Documents ────────────────────────────────────────────────────────────────────
 
 class DocumentUploadResponse(BaseModel):
     id: int
@@ -50,6 +72,7 @@ class DocumentUploadResponse(BaseModel):
     page_count: Optional[int] = None
     chunk_count: Optional[int] = None
     uploaded_at: datetime
+
 
 class DocumentOut(BaseModel):
     id: int
@@ -67,20 +90,48 @@ class DocumentOut(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+
+# ── Upload ─────────────────────────────────────────────────────────────────────
+
+class FileStatus(BaseModel):
+    filename: str
+    status: str
+    document_id: Optional[int] = None
+    error: Optional[str] = None
+
+
+class MultiUploadResponse(BaseModel):
+    files: List[FileStatus]
+
+
+# ── Chat ────────────────────────────────────────────────────────────────────────
+
 class ChatRequest(BaseModel):
     query: str
     conversation_id: Optional[int] = None
 
+
 class SourceCitation(BaseModel):
+    """
+    Structured citation for a retrieved chunk.
+    - filename: original document name
+    - page_number: page within the document (None for non-PDF)
+    - section: heading / section name within the page (if detected)
+    """
     filename: str
     page_number: Optional[int] = None
+    section: Optional[str] = None
+
 
 class ChatResponse(BaseModel):
     answer: str
     sources: List[SourceCitation] = []
-    confidence: Optional[str] = None
-    thought: Optional[str] = None
+    confidence: Optional[str] = None  # HIGH | MEDIUM | LOW
+    thought: Optional[str] = None     # Chain-of-thought (Qwen3 / DeepSeek)
     conversation_id: Optional[int] = None
+
+
+# ── Conversations & Messages ───────────────────────────────────────────────────
 
 class MessageOut(BaseModel):
     id: int
@@ -91,6 +142,7 @@ class MessageOut(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+
 class ConversationOut(BaseModel):
     id: int
     title: str
@@ -100,14 +152,6 @@ class ConversationOut(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+
 class ConversationCreate(BaseModel):
     title: str
-
-class FileStatus(BaseModel):
-    filename: str
-    status: str
-    document_id: Optional[int] = None
-    error: Optional[str] = None
-
-class MultiUploadResponse(BaseModel):
-    files: List[FileStatus]
